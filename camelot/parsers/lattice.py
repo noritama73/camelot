@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 
-from __future__ import division
 import os
 import sys
 import copy
 import locale
 import logging
 import warnings
-import subprocess
 
 import numpy as np
 import pandas as pd
@@ -30,6 +28,7 @@ from ..image_processing import (
     find_contours,
     find_joints,
 )
+from ..backends.image_conversion import BACKENDS
 
 
 logger = logging.getLogger("camelot")
@@ -112,7 +111,8 @@ class Lattice(BaseParser):
         threshold_constant=-2,
         iterations=0,
         resolution=300,
-        **kwargs
+        backend="ghostscript",
+        **kwargs,
     ):
         self.table_regions = table_regions
         self.table_areas = table_areas
@@ -129,6 +129,37 @@ class Lattice(BaseParser):
         self.threshold_constant = threshold_constant
         self.iterations = iterations
         self.resolution = resolution
+        self.backend = Lattice._get_backend(backend)
+
+    @staticmethod
+    def _get_backend(backend):
+        def implements_convert():
+            methods = [
+                method for method in dir(backend) if method.startswith("__") is False
+            ]
+            return "convert" in methods
+
+        if isinstance(backend, str):
+            if backend not in BACKENDS.keys():
+                raise NotImplementedError(
+                    f"Unknown backend '{backend}' specified. Please use either 'poppler' or 'ghostscript'."
+                )
+
+            if backend == "ghostscript":
+                warnings.warn(
+                    "'ghostscript' will be replaced by 'poppler' as the default image conversion"
+                    " backend in v0.12.0. You can try out 'poppler' with backend='poppler'.",
+                    DeprecationWarning,
+                )
+
+            return BACKENDS[backend]()
+        else:
+            if not implements_convert():
+                raise NotImplementedError(
+                    f"'{backend}' must implement a 'convert' method"
+                )
+
+            return backend
 
     @staticmethod
     def _reduce_index(t, idx, shift_text):
@@ -157,21 +188,25 @@ class Lattice(BaseParser):
         for r_idx, c_idx, text in idx:
             for d in shift_text:
                 if d == "l":
-                    if t.cells[r_idx][c_idx].hspan:
-                        while not t.cells[r_idx][c_idx].left:
-                            c_idx -= 1
+                    if ((r_idx < len(t.cells)) and (c_idx < len(t.cells[r_idx]))):
+                        if t.cells[r_idx][c_idx].hspan:
+                            while not t.cells[r_idx][c_idx].left:
+                                c_idx -= 1
                 if d == "r":
-                    if t.cells[r_idx][c_idx].hspan:
-                        while not t.cells[r_idx][c_idx].right:
-                            c_idx += 1
+                    if ((r_idx < len(t.cells)) and (c_idx < len(t.cells[r_idx]))):
+                        if t.cells[r_idx][c_idx].hspan:
+                            while not t.cells[r_idx][c_idx].right:
+                                c_idx += 1
                 if d == "t":
-                    if t.cells[r_idx][c_idx].vspan:
-                        while not t.cells[r_idx][c_idx].top:
-                            r_idx -= 1
+                    if ((r_idx < len(t.cells)) and (c_idx < len(t.cells[r_idx]))):
+                        if t.cells[r_idx][c_idx].vspan:
+                            while not t.cells[r_idx][c_idx].top:
+                                r_idx -= 1
                 if d == "b":
-                    if t.cells[r_idx][c_idx].vspan:
-                        while not t.cells[r_idx][c_idx].bottom:
-                            r_idx += 1
+                    if ((r_idx < len(t.cells)) and (c_idx < len(t.cells[r_idx]))):
+                        if t.cells[r_idx][c_idx].vspan:
+                            while not t.cells[r_idx][c_idx].bottom:
+                                r_idx += 1
             indices.append((r_idx, c_idx, text))
         return indices
 
@@ -207,19 +242,6 @@ class Lattice(BaseParser):
                             if t.cells[i][j].vspan and not t.cells[i][j].top:
                                 t.cells[i][j].text = t.cells[i - 1][j].text
         return t
-
-    def _generate_image(self):
-        from ..ext.ghostscript import Ghostscript
-
-        self.imagename = "".join([self.rootname, ".png"])
-        gs_call = "-q -sDEVICE=png16m -o {} -r300 {}".format(
-            self.imagename, self.filename
-        )
-        gs_call = gs_call.encode().split()
-        null = open(os.devnull, "wb")
-        with Ghostscript(*gs_call, stdout=null) as gs:
-            pass
-        null.close()
 
     def _generate_table_bbox(self):
         def scale_areas(areas):
@@ -355,7 +377,8 @@ class Lattice(BaseParser):
                         table, indices, shift_text=self.shift_text
                     )
                     for r_idx, c_idx, text in indices:
-                        table.cells[r_idx][c_idx].text = text
+                        if ((r_idx < len(table.cells)) and (c_idx < len(table.cells[r_idx]))):
+                            table.cells[r_idx][c_idx].text = text
         accuracy = compute_accuracy([[100, pos_errors]])
 
         if self.copy_text is not None:
@@ -400,7 +423,8 @@ class Lattice(BaseParser):
                 )
             return []
 
-        self._generate_image()
+        self.backend.convert(self.filename, self.imagename)
+
         self._generate_table_bbox()
 
         _tables = []

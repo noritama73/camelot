@@ -6,8 +6,7 @@ from ..utils import get_page_layout, get_text_objects
 
 
 class BaseParser(object):
-    """Defines a base parser.
-    """
+    """Defines a base parser."""
 
     def _generate_layout(self, filename, layout_kwargs):
         self.filename = filename
@@ -18,3 +17,4 @@ class BaseParser(object):
         self.vertical_text = get_text_objects(self.layout, ltype="vertical_text")
         self.pdf_width, self.pdf_height = self.dimensions
         self.rootname, __ = os.path.splitext(self.filename)
+        self.imagename = "".join([self.rootname, ".png"])

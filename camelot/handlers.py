@@ -3,7 +3,8 @@
 import os
 import sys
 
-from PyPDF2 import PdfFileReader, PdfFileWriter
+#from PyPDF2 import PdfFileReader, PdfFileWriter
+import fitz
 
 from .core import TableList
 from .parsers import Stream, Lattice
@@ -70,20 +71,22 @@ class PDFHandler(object):
         if pages == "1":
             page_numbers.append({"start": 1, "end": 1})
         else:
-            infile = PdfFileReader(open(filepath, "rb"), strict=False)
+            instream = open(filepath, "rb")
+            infile = fitz.open(instream)
             if infile.isEncrypted:
                 infile.decrypt(self.password)
             if pages == "all":
-                page_numbers.append({"start": 1, "end": infile.getNumPages()})
+                page_numbers.append({"start": 1, "end": infile.pageCount})
             else:
                 for r in pages.split(","):
                     if "-" in r:
                         a, b = r.split("-")
                         if b == "end":
-                            b = infile.getNumPages()
+                            b = infile.pageCount
                         page_numbers.append({"start": int(a), "end": int(b)})
                     else:
                         page_numbers.append({"start": int(r), "end": int(r)})
+            instream.close()
         P = []
         for p in page_numbers:
             P.extend(range(p["start"], p["end"] + 1))
@@ -103,16 +106,19 @@ class PDFHandler(object):
 
         """
         with open(filepath, "rb") as fileobj:
-            infile = PdfFileReader(fileobj, strict=False)
+            infile = fitz.open(fileobj)
             if infile.isEncrypted:
                 infile.decrypt(self.password)
-            fpath = os.path.join(temp, "page-{0}.pdf".format(page))
+            fpath = os.path.join(temp, f"page-{page}.pdf")
             froot, fext = os.path.splitext(fpath)
-            p = infile.getPage(page - 1)
-            outfile = PdfFileWriter()
-            outfile.addPage(p)
+            #p = infile.loadPage(page - 1)
+            outfile = fitz.open()
+            outfile.insert_pdf(infile, to_page=page-1, from_page=page-1)
+            """
             with open(fpath, "wb") as f:
                 outfile.write(f)
+            """
+            outfile.save(fpath)
             layout, dim = get_page_layout(fpath)
             # fix rotated PDF
             chars = get_text_objects(layout, ltype="char")
@@ -122,18 +128,23 @@ class PDFHandler(object):
             if rotation != "":
                 fpath_new = "".join([froot.replace("page", "p"), "_rotated", fext])
                 os.rename(fpath, fpath_new)
-                infile = PdfFileReader(open(fpath_new, "rb"), strict=False)
+                instream = open(fpath_new, "rb")
+                infile = fitz.open(instream)
                 if infile.isEncrypted:
                     infile.decrypt(self.password)
-                outfile = PdfFileWriter()
-                p = infile.getPage(0)
+                outfile = fitz.open()
+                p = infile.loadPage(0)
                 if rotation == "anticlockwise":
-                    p.rotateClockwise(90)
+                    p.set_rotation(90)
                 elif rotation == "clockwise":
-                    p.rotateCounterClockwise(90)
-                outfile.addPage(p)
+                    p.set_rotation(270)
+                outfile.insert_pdf(p)
+                """
                 with open(fpath, "wb") as f:
                     outfile.write(f)
+                """
+                outfile.save(fpath)
+                instream.close()
 
     def parse(
         self, flavor="lattice", suppress_stdout=False, layout_kwargs={}, **kwargs
@@ -163,9 +174,7 @@ class PDFHandler(object):
         with TemporaryDirectory() as tempdir:
             for p in self.pages:
                 self._save_page(self.filepath, p, tempdir)
-            pages = [
-                os.path.join(tempdir, "page-{0}.pdf".format(p)) for p in self.pages
-            ]
+            pages = [os.path.join(tempdir, f"page-{p}.pdf") for p in self.pages]
             parser = Lattice(**kwargs) if flavor == "lattice" else Stream(**kwargs)
             for p in pages:
                 t = parser.extract_tables(
@@ -173,3 +182,39 @@ class PDFHandler(object):
                 )
                 tables.extend(t)
         return TableList(sorted(tables))
+    
+    def top_mid(bbox):
+	    return ((bbox[0]+bbox[2])/2, bbox[3])
+ 
+    def bottom_mid(bbox):
+        return ((bbox[0]+bbox[2])/2, bbox[1])
+    
+    def distance(p1, p2):
+        return math.sqrt(((p1[0] -p2[0])**2) + ((p1[1] -p2[1])**2))
+    
+    def get_closest_text(table, htext_objs):
+        min_distance= 999  # Cause 9's are big :)
+        best_guess= None
+        table_mid= top_mid(table._bbox)  # Middle of the TOP of the table
+        for obj in htext_objs:
+            text_mid= bottom_mid(obj.bbox)  # Middle of the BOTTOM of the text
+            d= distance(text_mid, table_mid)
+            if d < min_distance:
+                best_guess= obj.get_text().strip()
+                min_distance= d
+        return best_guess
+    
+    def get_tables_and_titles(pdf_filename):
+        """Here's my hacky code for grabbing tables and guessing at their titles"""
+        my_handler= PDFHandler(pdf_filename)  # from camelot.handlers import PDFHandler
+        tables= camelot.read_pdf(pdf_filename, pages='2,3,4')
+        print('Extracting {:d} tables...'.format(tables.n))
+        titles= []
+        with camelot.utils.TemporaryDirectory() as tempdir:
+            for table in tables:
+                my_handler._save_page(pdf_filename, table.page, tempdir)
+                tmp_file_path= os.path.join(tempdir, f'page-{table.page}.pdf')
+                layout, dim= camelot.utils.get_page_layout(tmp_file_path)
+                htext_objs= camelot.utils.get_text_objects(layout, ltype="horizontal_text")
+                titles.append(get_closest_text(table, htext_objs))  # Might be None
+        return titles, tables
